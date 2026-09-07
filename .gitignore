@@ -1,0 +1,10 @@
+.pio
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# local working notes, not part of the released package
+TODO_next_version.md
