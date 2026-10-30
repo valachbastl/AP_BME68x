@@ -13,9 +13,11 @@ resistance.
   `isBME688()` reports which one was found
 - Float compensation from the Bosch BME68x reference implementation
 - Configurable oversampling (T/P/H), IIR filter and gas heater (temperature + duration)
-- Non-blocking init (`begin()` returns `esp_err_t`, never aborts the app)
+- Non-aborting init (`begin()` returns `esp_err_t`, never aborts the app)
 - Idempotent device registration; re-calling `begin()` re-verifies the sensor (recovery)
-- Sentinel values: `-126.0f` = sensor not found, `-127.0f` = read error
+- Sentinel values: `-126.0f` = sensor not found, `-127.0f` = read error — a
+  missing sensor is told apart from a failed read by an address probe,
+  independent of the ESP-IDF version
 
 ## Installation
 
@@ -32,7 +34,7 @@ Or with a specific version:
 
 ```ini
 lib_deps =
-    https://github.com/valachbastl/AP_BME68x.git#v1.0.0
+    https://github.com/valachbastl/AP_BME68x.git#v1.1.0
 ```
 
 ## Usage
@@ -85,13 +87,20 @@ AP_BME68x_Data d;
 esp_err_t ret = bme.read(d);
 
 if (ret != ESP_OK) {
-    if (d.temperature == AP_BME68x::NO_SENSOR) {
+    if (ret == ESP_ERR_NOT_FOUND) {          // d.* == AP_BME68x::NO_SENSOR
         // Sensor not found on the bus (disconnected or wrong address)
-    } else {
-        // I2C read error / measurement timeout
+    } else {                                  // d.* == AP_BME68x::READ_ERROR
+        // Sensor answers, but the I2C transfer or the measurement failed
     }
 }
 ```
+
+When a read fails, `read()` probes the sensor address once to decide which of
+the two it is (the error code of a failed I2C transfer alone cannot tell —
+it differs between ESP-IDF versions). A failed probe — NACK, or a bus timeout
+when the unplugged module took the I2C pull-ups with it — means `NO_SENSOR`.
+The probe runs only on the error path; the ESP-IDF I2C driver logs its own
+errors for it, as it does for the failed read.
 
 **Always branch on `ret` before scaling or storing the values.** On error every
 field holds a sentinel (`-126.0f` / `-127.0f`); pushed through arithmetic — e.g.
@@ -141,8 +150,8 @@ scope — that belongs in a layer above this driver.
 
 | Value | Constant | Meaning |
 |-------|----------|---------|
-| `-126.0f` | `NO_SENSOR` | Sensor not found on the I2C bus |
-| `-127.0f` | `READ_ERROR` | I2C read error / measurement timeout |
+| `-126.0f` | `NO_SENSOR` | Sensor does not answer on the I2C bus (`read()` returns `ESP_ERR_NOT_FOUND`), or `begin()` not called |
+| `-127.0f` | `READ_ERROR` | Sensor answers, but the I2C transfer or the measurement failed (e.g. measurement timeout) |
 
 ## Notes
 
@@ -156,8 +165,9 @@ scope — that belongs in a layer above this driver.
 - The gas element needs a burn-in period after first power-up — the resistance
   drifts for minutes to hours before it settles
 - I2C address: `0x76` (SDO→GND, Bosch primary) or `0x77` (SDO→VCC; Adafruit breakouts default here)
-- On ESP32-P4, I2C NACK is reported as `ESP_ERR_INVALID_STATE`
-- Before `begin()` (or if it fails) all methods return `ESP_ERR_INVALID_STATE`
+- Requires ESP-IDF ≥ 5.2 (new I2C master driver `driver/i2c_master.h`)
+- Before `begin()`, `read()` and `reset()` return `ESP_ERR_INVALID_STATE`;
+  `configure()` only stores the settings and may be called at any time
 - A registered device survives hot-plug: pulling the sensor returns read errors,
   re-inserting recovers automatically (calling `begin()` again re-verifies it)
 - No hardware averaging register; reduce noise via oversampling + IIR filter

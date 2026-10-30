@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.1.0] - 2026-10-30
+
+### Fixed
+- Rozlišení „senzor nenalezen“ / „chyba čtení“ v `read()` bylo obrácené.
+  Sentinel se určoval z kódu chyby I2C přenosu: `ESP_ERR_TIMEOUT` → `NO_SENSOR`,
+  ostatní → `READ_ERROR`. Nové ESP-IDF ale při NACK (odpojený senzor) i při
+  timeoutu sběrnice vrací `ESP_ERR_INVALID_RESPONSE` → odpojený senzor hlásil
+  `READ_ERROR`; naopak `ESP_ERR_TIMEOUT` vrací jen vlastní timeout měření
+  (senzor odpovídá, data nepřišla) → hlásil `NO_SENSOR`. Teď se po selhání
+  `read()` jednou otestuje adresa senzoru (`i2c_master_probe`): neúspěch
+  (NACK nebo timeout sběrnice — moduly mívají pull-upy na sobě, po vytažení
+  zůstanou linky dole a místo NACK přijde timeout) = `NO_SENSOR`, senzor
+  odpovídá = `READ_ERROR`. Nezávislé na verzi ESP-IDF, probe běží jen
+  v chybové větvi.
+- `CMakeLists.txt`: `REQUIRES` uváděl neexistující komponentu `esp_log` (komponenta
+  logu se v ESP-IDF jmenuje `log`) → čistý ESP-IDF build (`idf.py`) selhal při
+  konfiguraci na „Failed to resolve component“. Opraveno na `log`.
+- `idf_component.yml`: minimální ESP-IDF `>=5.0.0` → `>=5.2.0` (nový I2C master
+  driver `driver/i2c_master.h` existuje od 5.2).
+
+### Changed
+- `read()` vrací při nenalezeném senzoru `ESP_ERR_NOT_FOUND` (stejně jako
+  `begin()`), dřív kód chyby I2C přenosu závislý na verzi ESP-IDF. Ostatní chyby
+  beze změny.
+- Odhad okolní teploty pro výpočet odporu topení se omezuje na pracovní rozsah
+  senzoru (−40…85 °C) — převod `float` → `int8_t` mimo rozsah by byl nedefinovaný.
+- Odstraněn nepoužitý výpočet odporu topení v `configure()` (hodnota se stejně
+  přepočítává v každém cyklu měření) a člen `_resHeat0`. Chování beze změny.
+- README: opravena poznámka o stavu před `begin()` (`configure()` jen ukládá
+  nastavení, lze volat kdykoli); odstraněna zastaralá poznámka o kódu NACK na P4.
+
+**Otestováno na HW** 2026-10-30 — ESP32 (LaskaKit ESPlan + BME688 na 0x77, ESP-IDF 6.1):
+běžné měření T/P/H/plyn beze změny; vytažení senzoru za běhu → `NO_SENSOR` (`-126`),
+zpětné zasunutí → měření se samo obnoví; start bez senzoru → `begin()` `ESP_ERR_NOT_FOUND`,
+`read()` `NO_SENSOR`.
+
 ## [1.0.0] - 2026-09-07
 
 První veřejné vydání. Ověřeno na reálném HW (LaskaKit ESPlan + BME688 na 0x77).

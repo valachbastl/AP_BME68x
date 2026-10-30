@@ -1,7 +1,7 @@
 {
     "name": "AP_BME68x",
-    "version": "1.0.0",
-    "releaseDate": "2026-09-07",
+    "version": "1.1.0",
+    "releaseDate": "2026-10-30",
     "description": "Bosch BME680 / BME688 temperature/humidity/pressure/gas-resistance sensor driver for the ESP-IDF new I2C master API (variant auto-detected)",
     "keywords": ["bme680", "bme688", "bme68x", "bosch", "temperature", "humidity", "pressure", "gas", "i2c", "esp-idf", "esp32"],
     "authors": [

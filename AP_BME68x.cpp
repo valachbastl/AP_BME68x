@@ -47,6 +47,14 @@ static constexpr uint8_t REG_CAL1      = 0x89;  // 25 bytes: 0x89..0xA1
 static constexpr uint8_t REG_CAL2      = 0xE1;  // 14 bytes: 0xE1..0xEE
 static constexpr uint8_t REG_CAL_EXTRA = 0x00;  // 5 bytes: 0x00..0x04
 
+static constexpr int I2C_TIMEOUT_MS   = 100;  // per register transfer
+static constexpr int PROBE_TIMEOUT_MS = 50;   // address probe after a failed read()
+
+// Ambient temperature estimate used for the heater resistance is clamped to
+// the sensor's operating range (also keeps the float -> int8_t conversion defined).
+static constexpr float AMB_TEMP_MIN = -40.0f;
+static constexpr float AMB_TEMP_MAX = 85.0f;
+
 // Per-range correction factors for the gas-low (BME680) resistance formula —
 // Bosch BME68x reference (calc_gas_resistance_low, float).
 static const float GAS_LOW_K1[16] = {
@@ -131,7 +139,9 @@ esp_err_t AP_BME68x::read(AP_BME68x_Data &data)
     if (ret != ESP_OK) {
         // Single point of failure handling: classify disconnect vs read error
         // uniformly across every step of the sequence (no duplicated logic).
-        const float sentinel = _errorValue(ret);
+        ret = _classifyError(ret);
+        const float sentinel = (ret == ESP_ERR_NOT_FOUND || _dev == nullptr)
+                               ? NO_SENSOR : READ_ERROR;
         data.temperature   = sentinel;
         data.humidity      = sentinel;
         data.pressure      = sentinel;
@@ -176,8 +186,7 @@ esp_err_t AP_BME68x::_measure(AP_BME68x_Data &data)
         // cycle. A value fixed at begin() drifts as the room temperature moves,
         // which shows up as heat_stab_r dropping out (and the gas reading going
         // stale on consumers that gate on it).
-        _resHeat0 = _calcHeaterRes(_gasHeatTemp);
-        ret = _writeReg(REG_RES_HEAT_0, _resHeat0);
+        ret = _writeReg(REG_RES_HEAT_0, _calcHeaterRes(_gasHeatTemp));
         if (ret != ESP_OK) return ret;
         ret = _writeReg(REG_GAS_WAIT_0, _gasWait0);
         if (ret != ESP_OK) return ret;
@@ -262,7 +271,10 @@ esp_err_t AP_BME68x::_measure(AP_BME68x_Data &data)
     data.heatStable    = heatStab;
 
     // Update ambient temperature estimate for next heater calculation
-    _ambTemp = (int8_t)data.temperature;
+    float amb = data.temperature;
+    if (amb < AMB_TEMP_MIN) amb = AMB_TEMP_MIN;
+    if (amb > AMB_TEMP_MAX) amb = AMB_TEMP_MAX;
+    _ambTemp = (int8_t)amb;
 
     return ESP_OK;
 }
@@ -289,8 +301,9 @@ esp_err_t AP_BME68x::configure(uint8_t tempOs, uint8_t pressOs, uint8_t humOs,
 
     _gasEnabled  = (gasHeatTemp > 0);
     _gasHeatTemp = _gasEnabled ? gasHeatTemp : 0;
+    // The heater resistance (res_heat_0) is computed per cycle in _measure()
+    // from the latest ambient temperature - only the on-time is fixed here.
     if (_gasEnabled) {
-        _resHeat0 = _calcHeaterRes(gasHeatTemp);
         _gasWait0 = _encodeHeaterDur(gasHeatDurMs);
     }
 
@@ -317,22 +330,31 @@ esp_err_t AP_BME68x::configure(uint8_t tempOs, uint8_t pressOs, uint8_t humOs,
 esp_err_t AP_BME68x::_readReg(uint8_t reg, uint8_t *data, size_t len)
 {
     if (_dev == nullptr) return ESP_ERR_INVALID_STATE;  // begin() not called
-    return i2c_master_transmit_receive(_dev, &reg, 1, data, len, 100);
+    return i2c_master_transmit_receive(_dev, &reg, 1, data, len, I2C_TIMEOUT_MS);
 }
 
 esp_err_t AP_BME68x::_writeReg(uint8_t reg, uint8_t val)
 {
     if (_dev == nullptr) return ESP_ERR_INVALID_STATE;  // begin() not called
     uint8_t buf[2] = {reg, val};
-    return i2c_master_transmit(_dev, buf, 2, 100);
+    return i2c_master_transmit(_dev, buf, 2, I2C_TIMEOUT_MS);
 }
 
-float AP_BME68x::_errorValue(esp_err_t err)
+esp_err_t AP_BME68x::_classifyError(esp_err_t err) const
 {
-    // Disconnect / no ACK -> NO_SENSOR; anything else (bus glitch, timeout
-    // mid-transfer) -> READ_ERROR. INVALID_STATE = begin() not called yet.
-    return (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE)
-           ? NO_SENSOR : READ_ERROR;
+    // The error code of a failed I2C transfer cannot tell a missing sensor
+    // from a failed read: it differs between ESP-IDF versions, and newer
+    // releases report a NACK and a bus timeout with the same code
+    // (ESP_ERR_INVALID_RESPONSE). A direct address probe can. Any probe
+    // failure means the sensor is unreachable: a NACK (bus pulled up, nobody
+    // answers) or a bus timeout - breakout modules usually carry the I2C
+    // pull-ups, so with the module unplugged the lines stay low and the
+    // hardware times out instead of seeing a NACK. Runs only on the error path.
+    if (_dev == nullptr) return err;  // ESP_ERR_INVALID_STATE - begin() not called
+    if (i2c_master_probe(_bus, _address, PROBE_TIMEOUT_MS) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    return err;  // sensor answers - bus error or measurement timeout
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +416,7 @@ esp_err_t AP_BME68x::_readCalibration()
 // ---------------------------------------------------------------------------
 // Private — Compensation (float, from Bosch BME680 reference implementation)
 // ---------------------------------------------------------------------------
-float AP_BME68x::_compensateTemp(uint32_t adcTemp, int32_t &tFine)
+float AP_BME68x::_compensateTemp(uint32_t adcTemp, int32_t &tFine) const
 {
     float var1 = ((float)adcTemp / 16384.0f - (float)_cal.T1 / 1024.0f) * (float)_cal.T2;
     float var2 = (float)adcTemp / 131072.0f - (float)_cal.T1 / 8192.0f;
@@ -403,7 +425,7 @@ float AP_BME68x::_compensateTemp(uint32_t adcTemp, int32_t &tFine)
     return (var1 + var2) / 5120.0f;
 }
 
-float AP_BME68x::_compensatePress(uint32_t adcPres, int32_t tFine)
+float AP_BME68x::_compensatePress(uint32_t adcPres, int32_t tFine) const
 {
     float var1 = ((float)tFine / 2.0f) - 64000.0f;
     float var2 = var1 * var1 * (float)_cal.P6 / 131072.0f;
@@ -423,7 +445,7 @@ float AP_BME68x::_compensatePress(uint32_t adcPres, int32_t tFine)
     return pressure / 100.0f;  // Pa → hPa
 }
 
-float AP_BME68x::_compensateHum(uint16_t adcHum, int32_t tFine)
+float AP_BME68x::_compensateHum(uint16_t adcHum, int32_t tFine) const
 {
     float temp = (float)tFine / 5120.0f;
     float var1 = (float)adcHum
@@ -484,7 +506,7 @@ uint8_t AP_BME68x::_encodeFilter(uint8_t filter)
     return 7;  // 127
 }
 
-uint8_t AP_BME68x::_calcHeaterRes(uint16_t targetTemp)
+uint8_t AP_BME68x::_calcHeaterRes(uint16_t targetTemp) const
 {
     if (targetTemp > 400) targetTemp = 400;
     float var1 = ((float)_cal.G1 / 16.0f) + 49.0f;
@@ -507,7 +529,7 @@ uint8_t AP_BME68x::_encodeHeaterDur(uint16_t durMs)
     return (uint8_t)(durMs | (factor << 6));
 }
 
-uint16_t AP_BME68x::_decodeHeaterDurMs(uint8_t reg) const
+uint16_t AP_BME68x::_decodeHeaterDurMs(uint8_t reg)
 {
     // gas_wait_0: on-time = value (bits [5:0]) * multiplier (bits [7:6] = x1/x4/x16/x64).
     static const uint16_t MULT[4] = { 1, 4, 16, 64 };

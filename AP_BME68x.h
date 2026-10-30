@@ -49,8 +49,8 @@ public:
     static constexpr uint8_t ADDR_DEFAULT = 0x76;  // SDO pulled low
     static constexpr uint8_t ADDR_ALT     = 0x77;  // SDO pulled high
 
-    static constexpr float NO_SENSOR  = -126.0f;   // sensor not found (no ACK on I2C)
-    static constexpr float READ_ERROR = -127.0f;   // sensor found but read failed
+    static constexpr float NO_SENSOR  = -126.0f;   // sensor not found (no ACK on I2C) or begin() not called
+    static constexpr float READ_ERROR = -127.0f;   // sensor answers but the read / measurement failed
 
     /**
      * @brief Constructor — stores parameters only, does not touch the bus
@@ -70,8 +70,10 @@ public:
      *        the variant, read calibration and apply the default config. Call
      *        before read(). Safe to call again (e.g. recovery) — re-verifies the
      *        sensor.
-     * @return ESP_OK on success, ESP_ERR_NOT_FOUND if sensor not present,
-     *         or the error from i2c_master_bus_add_device
+     * @return ESP_OK on success, ESP_ERR_NOT_FOUND if the sensor does not
+     *         answer or the chip ID is wrong, the error from
+     *         i2c_master_bus_add_device, or an I2C error while reading the
+     *         variant / calibration
      */
     esp_err_t begin();
 
@@ -83,7 +85,11 @@ public:
      *        heater. Call read() at the task interval — no need to call begin()
      *        again.
      * @param data  Output data struct
-     * @return ESP_OK on success. On error every field carries the NO_SENSOR /
+     * @return ESP_OK on success; ESP_ERR_NOT_FOUND if the sensor does not
+     *         answer on the bus (NO_SENSOR); ESP_ERR_INVALID_STATE if begin()
+     *         was not called (NO_SENSOR); any other error = sensor answers but
+     *         the transfer or the measurement failed (READ_ERROR).
+     *         On error every field carries the NO_SENSOR /
      *         READ_ERROR sentinel and gasValid / heatStable are false. Callers
      *         MUST check this return value before scaling or storing the values
      *         — a sentinel put through arithmetic (e.g. Ω→kΩ) silently becomes
@@ -163,9 +169,8 @@ private:
     uint8_t  _ctrlHum     = 0;
     uint8_t  _ctrlMeas    = 0;
     uint8_t  _config      = 0;
-    uint8_t  _resHeat0    = 0;
     uint8_t  _gasWait0    = 0;
-    uint16_t _gasHeatTemp = 0;   // gas heater target [°C] (0 = gas disabled) — for per-cycle _resHeat0
+    uint16_t _gasHeatTemp = 0;   // gas heater target [°C] (0 = gas disabled) — for the per-cycle res_heat_0
     uint16_t _measDurMs   = 0;   // precomputed forced-mode measurement duration [ms]
     bool     _gasFaultLogged = false;   // one-shot WARN latch for a dead gas element
 
@@ -174,21 +179,22 @@ private:
     esp_err_t _readCalibration();
 
     // Full forced-mode cycle; fills data on success. read() wraps it and maps
-    // any error to the sentinel values via _errorValue().
+    // any error to the sentinel values via _classifyError().
     esp_err_t _measure(AP_BME68x_Data &data);
 
-    // Maps an esp_err_t to NO_SENSOR (disconnect/no ACK) or READ_ERROR.
-    static float _errorValue(esp_err_t err);
+    // After a failed read(): ESP_ERR_NOT_FOUND if an address probe fails (NACK
+    // or bus timeout - sensor unreachable), otherwise the original error.
+    esp_err_t _classifyError(esp_err_t err) const;
 
-    float _compensateTemp(uint32_t adcTemp, int32_t &tFine);
-    float _compensatePress(uint32_t adcPres, int32_t tFine);
-    float _compensateHum(uint16_t adcHum, int32_t tFine);
+    float _compensateTemp(uint32_t adcTemp, int32_t &tFine) const;
+    float _compensatePress(uint32_t adcPres, int32_t tFine) const;
+    float _compensateHum(uint16_t adcHum, int32_t tFine) const;
     float _compensateGas(uint16_t adcGas, uint8_t gasRange) const;      // BME680 (gas-low)
     float _compensateGasHigh(uint16_t adcGas, uint8_t gasRange) const;  // BME688 (gas-high)
 
-    uint8_t  _encodeOsrs(uint8_t os);
-    uint8_t  _encodeFilter(uint8_t filter);
-    uint8_t  _calcHeaterRes(uint16_t targetTemp);
-    uint8_t  _encodeHeaterDur(uint16_t durMs);
-    uint16_t _decodeHeaterDurMs(uint8_t reg) const;   // inverse of _encodeHeaterDur()
+    static uint8_t  _encodeOsrs(uint8_t os);
+    static uint8_t  _encodeFilter(uint8_t filter);
+    uint8_t  _calcHeaterRes(uint16_t targetTemp) const;
+    static uint8_t  _encodeHeaterDur(uint16_t durMs);
+    static uint16_t _decodeHeaterDurMs(uint8_t reg);  // inverse of _encodeHeaterDur()
 };

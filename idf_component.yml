@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.1.0"
 description: "Bosch BME680/BME688 temperature/humidity/pressure/gas-resistance sensor driver for the ESP-IDF new I2C master API (variant auto-detected)"
 dependencies:
-  idf: ">=5.0.0"
+  idf: ">=5.2.0"
